@@ -1,5 +1,5 @@
 # HER2 Amplification Analysis in TCGA-BRCA Pan-Cancer Atlas
-This script is a comprehensive gene expression analysis identifying HER2-specific transcriptional programs and prognostic signatures in breast invasive carcinoma using TCGA Pan-Cancer Atlas data from cBioPortal <https://www.cbioportal.org/study/summary?id=brca_tcga_pan_can_atlas_2018>.
+This script is a comprehensive gene expression analysis identifying HER2-specific transcriptional programs and prognostic signatures in breast invasive carcinoma using TCGA Pan-Cancer Atlas data from cBioPortal (<https://www.cbioportal.org/study/summary?id=brca_tcga_pan_can_atlas_2018>).
 
 ## Overview
 
@@ -16,7 +16,7 @@ This R Markdown script performs differential expression analysis between ERBB2-a
 ### 1. Data Loading
 ```
 Data Loading
-├── untar- Extract TCGA-BRCA tarball (optional)
+├── untar: Extract TCGA-BRCA tarball (optional)
 ├── read-RNAseq: Load RSEM RNA-seq counts (genes × samples)
 ├── read-patientData: Clinical data w/ survival (skip 4 header rows)
 └── read-cna: GISTIC copy number aberrations
@@ -68,7 +68,7 @@ Survival Analysis
 ## Prerequisites
 
 ```r
-# Core analysis packages
+# core analysis packages
 BiocManager::install(c("DESeq2", "clusterProfiler", "org.Hs.eg.db", "ReactomePA"))
 install.packages(c("pheatmap", "glmnet", "survival", "survminer", "ggpubr", "dplyr", "enrichplot"))
 ```

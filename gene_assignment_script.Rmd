@@ -1,0 +1,394 @@
+---
+title: "Gene Analysis Script"
+author: "Ilaria Benciolini"
+output: html_document
+---
+
+# Gene Expression Analysis
+
+### Data Loading
+```{r}
+#| label: untar-data
+
+# untar the data if starting from compressed file
+#untar("./brca_tcga_pan_can_atlas_2018.tar.gz")
+```
+
+Load TCGA-BRCA PanCanAtlas raw data files. RNA-seq uses RSEM normalized counts, CNA provides GISTIC log2 ratios, clinical data contains survival outcomes. Note clinical files have 4 metadata header rows to skip. Here I read the RNA-seq file: "data_mrna_seq_v2_rsem.txt".
+```{r}
+#| label: read-RNAseq
+
+data_rnaseq <- read.delim("./brca_tcga_pan_can_atlas_2018/data_mrna_seq_v2_rsem.txt")
+```
+
+Here I read the Patient Data file: "data_clinical_patient.txt"
+```{r}
+#| label: read-patientData
+
+# read clinical patient data using delim
+data_patient <- read.delim("./brca_tcga_pan_can_atlas_2018/data_clinical_patient.txt")
+# skip 5 rows of column descriptions 
+data_patient <- data_patient[5:dim(data_patient)[1],]
+```
+
+Here I read the Copy Number Aberrations Data: "data_cna.txt"
+```{r}
+#| label: read-cna
+
+# read copy number aberration data using delim
+data_cna <- read.delim("./brca_tcga_pan_can_atlas_2018/data_cna.txt")
+```
+
+### Sample Matching and ERBB2 Metadata
+
+Standardize TCGA barcodes across datasets (12-char patient IDs) and find common samples. This ensures all assays align for downstream analysis.
+```{r}
+#| label: match-ids
+
+# columns 1 and 2 are gene names
+assay = round(as.matrix(data_rnaseq[,-c(1,2)])) # round for DESeq2
+rownames(assay) = data_rnaseq[,1]
+
+pat_ids = data_patient[,1]
+
+# standardize patient IDs from all files
+pat_ids_rna = substr(colnames(assay), 1, 12) # from RNA-seq assay
+pat_ids_rna = gsub("\\.", "-", pat_ids_rna) # convert dots to dashes
+pat_ids_cna = substr(colnames(data_cna)[-1], 1, 12) # skip Hugo_Symbol column
+pat_ids_cna = gsub("\\.", "-", pat_ids_cna)
+
+pat_ids_patient = data_patient[,1]  # first column from clinical data
+
+# find common patients across all three
+common_patients = intersect(pat_ids_rna, intersect(pat_ids_cna, pat_ids_patient))
+cat("Common patients:", length(common_patients), "\n")
+
+# subset all matrices to common patients (maintain order)
+rna_keep = pat_ids_rna %in% common_patients
+cna_keep = pat_ids_cna %in% common_patients
+patient_keep = pat_ids_patient %in% common_patients
+
+assay_her2 = assay[, rna_keep]
+data_cna_her2 = data_cna[data_cna$Hugo_Symbol == "ERBB2", cna_keep, drop=FALSE]
+```
+
+### Extract ERBB2
+
+Define HER2 status from ERBB2 CNA log2 ratio (>0 = amplified). This creates binary metadata for DESeq2 design formula.
+```{r}
+#| label: ERBB2-level
+
+# extract ERBB2 CNA values (>0 = amplified)
+erbb2_cna = as.numeric(data_cna_her2[1, ])  # single row
+metadata_her2 = data.frame(
+  ERBB2_amp = factor(erbb2_cna > 0, labels=c("Normal", "Amplified")),
+  row.names = colnames(assay_her2)
+)
+
+# verify patient matching
+print(table(metadata_her2$ERBB2_amp))
+```
+
+### DESeq2 Differential Expression Analysis
+
+Filter low-count genes and create DESeqDataSet. Genes must have ≥10 counts in ≥3 samples. DESeq2 design tests Amplification effect.
+```{r}
+#| label: dds-her2
+#| warning: false
+
+library(DESeq2)
+
+# filter low-count genes (as before)
+keep = rowSums(assay_her2 >= 10) >= 3
+assay_her2 = assay_her2[keep, ]
+assay_her2[is.na(assay_her2)] = 0
+assay_her2[assay_her2 < 0] = 0
+
+# create DESeqDataSet (~HER2 design)
+dds_her2 = DESeqDataSetFromMatrix(
+  countData = round(assay_her2),
+  colData = metadata_her2,
+  design = ~ ERBB2_amp
+)
+```
+
+Run DESeq2 normalization and Wald testing. Extract results comparing Amplified vs Normal.
+```{r}
+#| label: deseq-normalize
+#| warning: false
+
+# normalize and test
+dds_her2 = DESeq(dds_her2)
+res_her2 = results(dds_her2)  # HER2-amplified vs normal DE genes
+resultsNames(dds_her2) # lists the coefficients
+
+# print Top 10 most differentially expressed
+res_her2[order(res_her2$padj)[1:10],]
+top10_fc = res_her2[order(abs(res_her2$log2FoldChange), decreasing=TRUE)[1:10], c("log2FoldChange", "padj")]
+print("Top 10 by |Fold Change|:"); print(top10_fc)
+```
+
+### Visualization: PCA
+
+Generate VST-transformed data for visualization (stabilizes variance across mean expression).
+```{r}
+#| label: plotPCA-her2
+
+# VST for visualization
+vsd_her2 = vst(dds_her2)
+plotPCA(vsd_her2, intgroup="ERBB2_amp")
+```
+
+### Pathway Enrichment Analysis
+
+GO/KEGG/Reactome enrichment on significant DE genes (padj<0.05), separated by up/downregulation.
+```{r}
+#| label: enrichment-1
+#| warning: false
+
+if (!requireNamespace("clusterProfiler", quietly = TRUE))
+  BiocManager::install("clusterProfiler")
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE))
+  BiocManager::install("org.Hs.eg.db")
+if (!requireNamespace("enrichplot", quietly = TRUE))
+  install.packages("enrichplot")
+
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+
+# get subset of differentially expressed genes
+res_sig = res_her2[res_her2$padj<0.05,]
+
+# separate into over and under expressed using log2foldchange
+DE_over = rownames(res_sig[res_sig$log2FoldChange>0,])
+DE_under = rownames(res_sig[res_sig$log2FoldChange<0,])
+
+go_results_over = enrichGO(
+  gene          = DE_over,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",  
+  ont           = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# print and plot results
+print(head(go_results_over))
+
+go_results_under = enrichGO(
+  gene          = DE_under,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",  
+  ont           = "BP", 
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# print and plot results
+print(head(go_results_under))
+dotplot(go_results_under, showCategory=10) + ggtitle("Gene Ontology Enrichment Under Expressed")
+```
+
+```{r}
+#| label: enrichment-2
+#| warning: false
+
+if (!requireNamespace("pathview", quietly = TRUE))
+  BiocManager::install("pathview")
+if (!requireNamespace("ReactomePA", quietly = TRUE))
+  BiocManager::install("ReactomePA")
+
+library(ReactomePA)
+library(pathview)
+
+# map into entrez for Reactome and Keggs
+gene_entrez_over <- bitr(
+  DE_over,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+
+gene_entrez_under <- bitr(
+  DE_under,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+
+kegg_results_over =  enrichKEGG(
+  gene          = gene_entrez_over[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+kegg_results_under =  enrichKEGG(
+  gene          = gene_entrez_under[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+print(head(kegg_results_over))
+dotplot(kegg_results_over, showCategory=10) + ggtitle("Kegg Pathway Enrichment Over Expressed")
+
+print(head(kegg_results_under))
+dotplot(kegg_results_under, showCategory=10) + ggtitle("Kegg Pathway Enrichment Under Expressed")
+```
+
+
+```{r}
+#| label: enrichment-3
+
+reactome_results_over =  enrichPathway(
+  gene          = gene_entrez_over[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+)
+
+reactome_results_under =  enrichPathway(
+  gene          = gene_entrez_under[,2],
+  organism      = "human",   
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+)
+
+print(head(reactome_results_over))
+dotplot(reactome_results_over, showCategory=10) + ggtitle("Reactome Pathway Enrichment Over Expressed")
+
+print(head(reactome_results_under))
+dotplot(reactome_results_under, showCategory=10) + ggtitle("Reactome Pathway Enrichment Under Expressed")
+```
+
+```{r}
+#| label: enrichment-4
+
+go_results_under_pw = pairwise_termsim(go_results_under)
+treeplot(go_results_under_pw)+ ggtitle("GO Enrichment Under Expressed")
+
+kegg_results_under_pw = pairwise_termsim(kegg_results_under)
+treeplot(kegg_results_under_pw)+ ggtitle("KEGG Enrichment Under Expressed")
+```
+
+### Visualization: Heatmap
+
+Clustering heatmap of top-20 DE genes shows subtype coherence.
+
+```{r}
+#| label: clustering
+
+# subset the dataset on differentially expressed gene 
+top_DE = order(res_sig$padj)
+vsd_DE = assay(vsd_her2)[top_DE[1:20],]
+# to simplify the visualization get top most different genes
+
+# install packages for nicer heatmap than R's base one
+if (!requireNamespace("pheatmap", quietly = TRUE))
+  install.packages("pheatmap")
+
+library(pheatmap)
+
+#annotation_col = data.frame(Early = as.matrix(metadata[,1]))
+annotation_col = data.frame(ERBB2_amp = metadata_her2[colnames(vsd_her2),],
+                           row.names = colnames(vsd_her2))
+rownames(annotation_col) = colnames(vsd_her2)
+
+pheatmap(
+  vsd_DE,
+  cluster_rows = TRUE,      
+  cluster_cols = TRUE,  
+  scale = 'row',
+  show_colnames = FALSE,
+  show_rownames = TRUE,
+  annotation_col = annotation_col)
+```
+
+### Prognostic Cox Regression
+
+Match survival data to HER2 cohort and build elastic net Cox model on DE genes.
+```{r}
+# extract survival data (must match assay colnames)
+col_OS_status = which(colnames(data_patient) == "Overall.Survival.Status")
+col_OS_time = which(colnames(data_patient) == "Overall.Survival..Months.")
+
+# create matching vectors (reuse barcode matching logic)
+surv_time = rep(NA, ncol(vsd_her2))  # HER2 samples
+surv_status = rep(NA, ncol(vsd_her2))
+
+pat_ids = data_patient[,1]
+for(i in 1:ncol(vsd_her2)){
+  pat_barcode = substr(colnames(vsd_her2)[i], 1, 12)
+  pat_barcode = gsub("\\.", "-", pat_barcode)
+  idx = which(pat_barcode == pat_ids)
+  if(length(idx) > 0){
+    surv_time[i] = as.numeric(data_patient[idx, col_OS_time])
+    surv_status[i] = as.numeric(data_patient[idx, col_OS_status] == "1:DECEASED")
+  }
+}
+
+# restrict to complete survival data
+keep = complete.cases(surv_time) & surv_time > 0
+surv_time = surv_time[keep]
+surv_status = surv_status[keep]
+vst_de = assay(vsd_her2)[rownames(res_her2)[res_her2$padj<0.05], keep]  # HER2 DE genes
+```
+
+```{r}
+library(glmnet)
+library(survival)
+
+# cox regression with elastic net (alpha=0.5 balances ridge/lasso)
+cv_cox = cv.glmnet(t(vst_de),  # transpose: genes=features, samples=observations
+                   Surv(surv_time, surv_status),
+                   family = "cox",
+                   alpha = 0.5,
+                   nfolds = 5)
+
+# plot cross-validation curve
+plot(cv_cox)
+
+# extract optimal lambda and coefficients
+best_lambda = cv_cox$lambda.min
+cox_coef = coef(cv_cox, s = best_lambda)
+selected_genes = rownames(cox_coef)[which(cox_coef[,1] != 0)]
+print(paste("Selected genes:", length(selected_genes)))
+```
+
+```{r}
+library(ggpubr)
+library(survminer)
+library(dplyr)
+
+# predict risk scores
+risk_scores = predict(cv_cox, t(vst_de), s = best_lambda, type = "response")
+# make data frame with survival data and risk groups
+surv_data = data.frame(
+  time = surv_time,
+  status = surv_status,
+  risk_score = as.vector(risk_scores),
+  risk_group = ntile(as.vector(risk_scores), 3)
+)
+surv_data$risk_group = factor(surv_data$risk_group, labels = c("Low", "Med", "High"))
+
+# fit stratified KM with data argument
+fit = survfit(Surv(time, status) ~ risk_group, data = surv_data)
+
+ggsurvplot(fit, 
+           data = surv_data,  # Required argument
+           pval = TRUE, 
+           conf.int = TRUE,
+           title = "Cox Elastic Net Risk Model",
+           risk.table = TRUE,  # Optional: add risk table
+           legend.labs = c("Low", "Med", "High"))
+```
+
+

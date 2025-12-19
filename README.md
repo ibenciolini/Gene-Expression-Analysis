@@ -1,16 +1,6 @@
 # HER2 Amplification Analysis in TCGA-BRCA Pan-Cancer Atlas
 This script is a comprehensive gene expression analysis identifying HER2-specific transcriptional programs and prognostic signatures in breast invasive carcinoma using TCGA Pan-Cancer Atlas data from cBioPortal (<https://www.cbioportal.org/study/summary?id=brca_tcga_pan_can_atlas_2018>).
 
-## Overview
-
-This R Markdown script performs differential expression analysis between ERBB2-amplified and normal breast tumors from the TCGA-BRCA PanCanAtlas cohort (~1,000 primary tumors). Key analyses include:
-
-1. **Multi-omics integration**: RNA-seq, CNA, clinical data alignment
-2. **HER2 stratification**: CNA-defined amplification status
-3. **DESeq2 DE analysis**: 403 significant genes (padj<0.05)
-4. **Pathway enrichment**: Immune activation, ECM remodeling signatures
-5. **Prognostic modeling**: 17-gene elastic net Cox signature (p<0.0001)
-
 ## Workflow Sections
 
 ### 1. Data Loading
